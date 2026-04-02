@@ -3,6 +3,8 @@ data/auth/
 
 # Banco de dados local
 data/db.sqlite
+data/db.sqlite-shm
+data/db.sqlite-wal
 
 # Dependências
 node_modules/
