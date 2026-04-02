@@ -13,7 +13,7 @@ export interface MessageReceivedEvent {
   text: string | null
   messageType: string   // "conversation", "imageMessage", etc.
   rawPayload: string    // JSON.stringify of the raw Baileys object
-  type: 'notify' | 'append' // notify = new message, append = history
+  type: 'notify' | 'append' | 'resume' | 'last' // notify = new message, append = history, resume/last = Baileys internal
 }
 
 export interface ChatUpdatedEvent {
@@ -35,10 +35,16 @@ export interface ContactUpdatedEvent {
 // emit() and on() call is fully type-checked without casting to `any`.
 // ---------------------------------------------------------------------------
 
+export interface WhatsAppQrEvent {
+  qr: string  // raw QR string from Baileys — pass to any QR renderer
+}
+
 export interface BusEventMap {
   'message:received': [MessageReceivedEvent]
   'chat:updated': [ChatUpdatedEvent]
   'contact:updated': [ContactUpdatedEvent]
+  'whatsapp:qr': [WhatsAppQrEvent]
+  'whatsapp:connected': []
 }
 
 // ---------------------------------------------------------------------------

@@ -73,21 +73,25 @@ export const classifications = sqliteTable(
 );
 
 // classification_history — audit trail imutável de todas as classificações
-export const classificationHistory = sqliteTable('classification_history', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  conversation_id: text('conversation_id')
-    .notNull()
-    .references(() => conversations.id),
-  status: text('status').notNull(),
-  intent: text('intent'),
-  sentiment: text('sentiment'),
-  priority: integer('priority').default(3),
-  summary: text('summary'),
-  next_action: text('next_action'),
-  classified_by: text('classified_by').notNull(),
-  model_version: text('model_version'),
-  classified_at: integer('classified_at').notNull(),
-});
+export const classificationHistory = sqliteTable(
+  'classification_history',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    conversation_id: text('conversation_id')
+      .notNull()
+      .references(() => conversations.id),
+    status: text('status').notNull(),
+    intent: text('intent'),
+    sentiment: text('sentiment'),
+    priority: integer('priority').default(3),
+    summary: text('summary'),
+    next_action: text('next_action'),
+    classified_by: text('classified_by').notNull(),
+    model_version: text('model_version'),
+    classified_at: integer('classified_at').notNull(),
+  },
+  (table) => [index('classification_history_conversation_id_idx').on(table.conversation_id)],
+);
 
 // sync_runs — log de execuções do scheduler
 export const syncRuns = sqliteTable('sync_runs', {
