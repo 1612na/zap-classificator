@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist-tools",
+    "noEmit": false
+  },
+  "include": ["drizzle.config.ts"]
+}

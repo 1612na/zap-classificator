@@ -1,0 +1,28 @@
+# Credenciais WhatsApp — NUNCA commitar
+data/auth/
+
+# Banco de dados local
+data/db.sqlite
+
+# Dependências
+node_modules/
+
+# Build
+dist/
+
+# Logs opcionais
+data/logs/
+
+# Ambiente
+.env
+.env.local
+.env.*.local
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
