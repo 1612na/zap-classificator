@@ -95,6 +95,7 @@ export function registerListeners(sock: WASocket): void {
     for (const msg of messages) {
       const { id, remoteJid, fromMe, participant } = msg.key
       if (!id || !remoteJid) continue
+      if (remoteJid.endsWith('@g.us')) continue   // ignora grupos
 
       const tsRaw = msg.messageTimestamp
       const tsMs =
@@ -135,6 +136,7 @@ export function registerListeners(sock: WASocket): void {
   // ── chats.upsert ─────────────────────────────────────────────────────────
   sock.ev.on('chats.upsert', (chats) => {
     for (const chat of chats) {
+      if (chat.id.endsWith('@g.us')) continue   // ignora grupos
       const tsRaw = chat.conversationTimestamp
       const lastMessageTime =
         tsRaw == null
@@ -157,6 +159,7 @@ export function registerListeners(sock: WASocket): void {
   sock.ev.on('chats.update', (chats) => {
     for (const chat of chats) {
       if (!chat.id) continue
+      if (chat.id.endsWith('@g.us')) continue   // ignora grupos
 
       const tsRaw = chat.conversationTimestamp
       const lastMessageTime =
