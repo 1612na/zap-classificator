@@ -65,3 +65,24 @@ export const syncRuns = sqliteTable('sync_runs', {
   error: text('error'),
   status: text('status').default('running'),
 });
+
+// push_queue — fila de eventos pendentes de envio para o Render
+export const pushQueue = sqliteTable(
+  'push_queue',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    entity_type: text('entity_type').notNull(), // 'contact' | 'conversation' | 'message'
+    entity_id: text('entity_id').notNull(),
+    payload: text('payload').notNull(),          // JSON serializado do DTO
+    status: text('status').notNull().default('pending'), // 'pending' | 'sent' | 'failed'
+    attempts: integer('attempts').notNull().default(0),
+    next_attempt_at: integer('next_attempt_at').notNull(), // Unix ms
+    created_at: integer('created_at').notNull(),
+    sent_at: integer('sent_at'),
+    error: text('error'),
+  },
+  (table) => [
+    index('push_queue_status_idx').on(table.status),
+    index('push_queue_next_attempt_idx').on(table.next_attempt_at),
+  ],
+);

@@ -43,6 +43,21 @@ CREATE TABLE `messages` (
 --> statement-breakpoint
 CREATE INDEX `messages_chat_id_idx` ON `messages` (`chat_id`);--> statement-breakpoint
 CREATE INDEX `messages_timestamp_idx` ON `messages` (`timestamp`);--> statement-breakpoint
+CREATE TABLE `push_queue` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`entity_type` text NOT NULL,
+	`entity_id` text NOT NULL,
+	`payload` text NOT NULL,
+	`status` text DEFAULT 'pending' NOT NULL,
+	`attempts` integer DEFAULT 0 NOT NULL,
+	`next_attempt_at` integer NOT NULL,
+	`created_at` integer NOT NULL,
+	`sent_at` integer,
+	`error` text
+);
+--> statement-breakpoint
+CREATE INDEX `push_queue_status_idx` ON `push_queue` (`status`);--> statement-breakpoint
+CREATE INDEX `push_queue_next_attempt_idx` ON `push_queue` (`next_attempt_at`);--> statement-breakpoint
 CREATE TABLE `sync_runs` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`run_type` text NOT NULL,
