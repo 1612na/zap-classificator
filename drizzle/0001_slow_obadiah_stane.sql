@@ -1,1 +1,0 @@
-CREATE INDEX `classification_history_conversation_id_idx` ON `classification_history` (`conversation_id`);
