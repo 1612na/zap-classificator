@@ -130,6 +130,22 @@ export function registerListeners(sock: WASocket): void {
 
       bus.emit('message:received', event)
       console.log(`[listener] message:received  chat=${event.chatId}  type=${event.messageType}  fromMe=${event.fromMe}`)
+
+      // Captura push_name (nome WhatsApp) do remetente em mensagens recebidas
+      if (!fromMe && msg.pushName) {
+        const contactRawJid = senderJid ?? remoteJid
+        const contactId = cleanJid(contactRawJid)
+        const pushEvent: ContactUpdatedEvent = {
+          id: contactId,
+          name: null,
+          pushName: msg.pushName,
+          displayName: null,
+          isBusiness: false,
+          avatarUrl: null,
+          about: null,
+        }
+        bus.emit('contact:updated', pushEvent)
+      }
     }
   })
 
