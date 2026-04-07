@@ -9,16 +9,17 @@ import {
 import { normalizeContact, normalizeChat, normalizeMessage } from './ingestao/normalizer.js';
 import { bus } from './shared/events.js';
 import { createConnection } from './whatsapp/auth.js';
-import { startDashboard } from './dashboard/api.js';
+import { startLocalApi } from './dashboard/api.js';
+import { enqueue } from './pusher/queue.js';
+import { startPusherWorker } from './pusher/worker.js';
 
 async function main(): Promise<void> {
-  // 1. Garantir schema atualizado (idempotente)
   migrate(db, { migrationsFolder: './drizzle' });
   console.log('[index] Banco de dados inicializado');
 
-  // 2. Persistir eventos do Baileys → normalizer → repository
+  // ── Persist + enqueue ────────────────────────────────────────────────────
+
   bus.on('message:received', (e) => {
-    console.log('[bus] message:received', { id: e.id, chatId: e.chatId, type: e.messageType });
     try {
       const now = Date.now();
       const isGroup = e.chatId.endsWith('@g.us');
@@ -32,38 +33,44 @@ async function main(): Promise<void> {
         created_at: now,
         updated_at: now,
       });
-      upsertMessage(db, normalizeMessage(e));
+      const msg = normalizeMessage(e);
+      upsertMessage(db, msg);
+      enqueue(db, 'message', msg.id, msg);
     } catch (err) {
-      console.error('[bus] message:received persist error', err);
+      console.error('[bus] message:received error', err);
     }
   });
 
   bus.on('chat:updated', (e) => {
-    console.log('[bus] chat:updated', { id: e.id, unreadCount: e.unreadCount });
     try {
       const normalized = normalizeChat(e);
       if (normalized.contact_id !== null) {
         ensureContactStub(db, normalized.contact_id);
       }
       upsertConversation(db, normalized);
+      enqueue(db, 'conversation', normalized.id, normalized);
     } catch (err) {
-      console.error('[bus] chat:updated persist error', err);
+      console.error('[bus] chat:updated error', err);
     }
   });
 
   bus.on('contact:updated', (e) => {
-    console.log('[bus] contact:updated', { id: e.id, name: e.name });
     try {
-      upsertContact(db, normalizeContact(e));
+      const contact = normalizeContact(e);
+      upsertContact(db, contact);
+      enqueue(db, 'contact', contact.id, contact);
     } catch (err) {
-      console.error('[bus] contact:updated persist error', err);
+      console.error('[bus] contact:updated error', err);
     }
   });
 
-  // 3. Iniciar API REST
-  startDashboard();
+  // ── Workers ──────────────────────────────────────────────────────────────
 
-  // 4. Conectar ao WhatsApp
+  startPusherWorker(db);
+  startLocalApi();
+
+  // ── WhatsApp ─────────────────────────────────────────────────────────────
+
   console.log('[index] Iniciando conexão WhatsApp…');
   await createConnection();
 }
