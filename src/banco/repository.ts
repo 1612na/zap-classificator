@@ -1,4 +1,4 @@
-import { sql, eq } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { contacts, conversations, messages } from './schema.js';
 import type { Database } from './db.js';
 import type { NormalizedContact, NormalizedChat, NormalizedMessage } from '../shared/types.js';
