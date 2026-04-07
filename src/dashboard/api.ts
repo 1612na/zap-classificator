@@ -1,34 +1,23 @@
-// ---------------------------------------------------------------------------
-// dashboard/api.ts — Express REST API para o dashboard do zap-classificator.
-//
-// Consome o banco via drizzle-orm diretamente (sem repositório intermediário).
-// Importa saveClassification do banco/repository para o endpoint de override
-// manual, e runIncrementalSync + runWithLock para o trigger de sync.
-// ---------------------------------------------------------------------------
-
-import express, {
-  type Request,
-  type Response,
-  type NextFunction,
-} from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import path from 'path';
-import { eq, gte, desc, isNull, sql, and } from 'drizzle-orm';
+import { desc, gte, lt, eq, sql, and } from 'drizzle-orm';
 import { db } from '../banco/db.js';
-import {
-  conversations,
-  messages,
-  classifications,
-  classificationHistory,
-  syncRuns,
-} from '../banco/schema.js';
-import { saveClassification } from '../banco/repository.js';
-import { runIncrementalSync } from '../scheduler/sync.js';
-import { runWithLock, isLocked } from '../scheduler/lock.js';
-import type { ClassificationResult } from '../shared/types.js';
+import { conversations, contacts, messages } from '../banco/schema.js';
 import { bus } from '../shared/events.js';
+import type {
+  ConversationSummary,
+  ConversationFull,
+  PaginatedSummaryResponse,
+  IncrementalSyncResponse,
+  ApiContact,
+  ApiContactFull,
+  ApiMessage,
+  ApiMessageFull,
+  ApiMessageType,
+} from '../shared/types.js';
 
 // ---------------------------------------------------------------------------
-// QR state — updated via bus events from auth.ts
+// QR state
 // ---------------------------------------------------------------------------
 
 let currentQr: string | null = null;
@@ -38,17 +27,122 @@ bus.on('whatsapp:qr', ({ qr }) => { currentQr = qr; whatsappStatus = 'pending'; 
 bus.on('whatsapp:connected', () => { currentQr = null; whatsappStatus = 'connected'; });
 
 // ---------------------------------------------------------------------------
-// helpers
+// Helpers
 // ---------------------------------------------------------------------------
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
 }
 
-function parseIntParam(raw: unknown, defaultVal: number): number {
+function parseIntParam(raw: unknown, def: number): number {
   const n = Number(raw);
-  return Number.isFinite(n) ? Math.floor(n) : defaultVal;
+  return Number.isFinite(n) ? Math.floor(n) : def;
 }
+
+function toE164(rawPhone: string): string {
+  return rawPhone.startsWith('+') ? rawPhone : `+${rawPhone}`;
+}
+
+const MSG_TYPE_MAP: Record<string, ApiMessageType> = {
+  conversation: 'text',
+  extendedTextMessage: 'text',
+  imageMessage: 'image',
+  videoMessage: 'video',
+  documentMessage: 'document',
+  audioMessage: 'audio',
+  stickerMessage: 'sticker',
+};
+
+function mapMsgType(raw: string): ApiMessageType {
+  return MSG_TYPE_MAP[raw] ?? 'text';
+}
+
+/** Builds "from" field: JID do remetente ou "me" */
+function buildFrom(row: { from_me: number; sender_jid: string | null; chat_id: string }): string {
+  if (row.from_me === 1) return 'me';
+  return row.sender_jid ?? row.chat_id;
+}
+
+function buildApiContact(row: {
+  id: string;
+  name: string | null;
+  push_name: string | null;
+  is_business: number | null;
+  avatar_url: string | null;
+}): ApiContact {
+  return {
+    phone: toE164(row.id),
+    name: row.name,
+    push_name: row.push_name,
+    is_business: row.is_business === 1,
+    avatar_url: row.avatar_url,
+  };
+}
+
+function buildApiContactFull(row: {
+  id: string;
+  name: string | null;
+  push_name: string | null;
+  is_business: number | null;
+  avatar_url: string | null;
+  about: string | null;
+}): ApiContactFull {
+  return { ...buildApiContact(row), about: row.about };
+}
+
+function buildApiMessage(row: {
+  id: string;
+  from_me: number;
+  sender_jid: string | null;
+  chat_id: string;
+  message_type: string;
+  text: string | null;
+  timestamp: number;
+  has_media: number | null;
+}): ApiMessage {
+  return {
+    id: row.id,
+    from: buildFrom(row),
+    direction: row.from_me === 1 ? 'outbound' : 'inbound',
+    type: mapMsgType(row.message_type),
+    text: row.text,
+    timestamp: new Date(row.timestamp).toISOString(),
+    has_media: row.has_media === 1,
+  };
+}
+
+function buildApiMessageFull(row: {
+  id: string;
+  from_me: number;
+  sender_jid: string | null;
+  chat_id: string;
+  message_type: string;
+  text: string | null;
+  timestamp: number;
+  has_media: number | null;
+  media_url: string | null;
+  media_mime: string | null;
+  quoted_message_id: string | null;
+  is_forwarded: number | null;
+}): ApiMessageFull {
+  return {
+    ...buildApiMessage(row),
+    media_url: row.media_url,
+    media_mime: row.media_mime,
+    quoted_message_id: row.quoted_message_id,
+    is_forwarded: row.is_forwarded === 1,
+  };
+}
+
+// Fallback contact para conversas sem contato associado (grupos ou contatos não sincronizados)
+const UNKNOWN_CONTACT: ApiContactFull = {
+  phone: '+0',
+  name: null,
+  push_name: null,
+  is_business: false,
+  avatar_url: null,
+  about: null,
+};
 
 // ---------------------------------------------------------------------------
 // createApp
@@ -60,316 +154,284 @@ export function createApp(): express.Application {
   app.use(express.static(path.join(import.meta.dirname, 'frontend')));
 
   // -------------------------------------------------------------------------
-  // GET /conversations
+  // GET /conversations/summary
+  // Triagem paginada — 10 mensagens mais recentes por conversa.
+  // Query params: page, limit, since (alias: updated_after)
   // -------------------------------------------------------------------------
-  app.get('/conversations', (req: Request, res: Response, next: NextFunction) => {
+  app.get('/conversations/summary', (req: Request, res: Response, next: NextFunction) => {
     try {
-      const limit = clamp(parseIntParam(req.query['limit'], 50), 1, 200);
-      const offset = Math.max(0, parseIntParam(req.query['offset'], 0));
+      const page = Math.max(1, parseIntParam(req.query['page'], 1));
+      const limit = clamp(parseIntParam(req.query['limit'], 50), 1, 100);
+      const offset = (page - 1) * limit;
 
-      const filterStatus = typeof req.query['status'] === 'string' ? req.query['status'] : undefined;
-      const filterPriority = typeof req.query['priority'] === 'string' ? Number(req.query['priority']) : undefined;
-      const filterIntent = typeof req.query['intent'] === 'string' ? req.query['intent'] : undefined;
-      const filterClassifiedBy = typeof req.query['classified_by'] === 'string' ? req.query['classified_by'] : undefined;
-      const filterSince = typeof req.query['since'] === 'string' ? Number(req.query['since']) : undefined;
+      const sinceRaw = req.query['since'] ?? req.query['updated_after'];
+      const sinceMs = sinceRaw ? new Date(String(sinceRaw)).getTime() : null;
 
-      // Build WHERE conditions
-      const conditions = [];
+      const whereClause = sinceMs && Number.isFinite(sinceMs)
+        ? gte(conversations.last_message_at, sinceMs)
+        : undefined;
 
-      if (filterStatus !== undefined) {
-        conditions.push(eq(classifications.status, filterStatus));
-      }
-      if (filterPriority !== undefined && Number.isFinite(filterPriority)) {
-        conditions.push(eq(classifications.priority, filterPriority));
-      }
-      if (filterIntent !== undefined) {
-        conditions.push(eq(classifications.intent, filterIntent));
-      }
-      if (filterClassifiedBy !== undefined) {
-        conditions.push(eq(classifications.classified_by, filterClassifiedBy));
-      }
-      if (filterSince !== undefined && Number.isFinite(filterSince)) {
-        conditions.push(gte(conversations.last_message_at, filterSince));
-      }
-
-      const query = db
-        .select({
-          id: conversations.id,
-          contact_id: conversations.contact_id,
-          name: conversations.name,
-          is_group: conversations.is_group,
-          last_message_at: conversations.last_message_at,
-          unread_count: conversations.unread_count,
-          is_archived: conversations.is_archived,
-          created_at: conversations.created_at,
-          updated_at: conversations.updated_at,
-          classification: {
-            id: classifications.id,
-            status: classifications.status,
-            intent: classifications.intent,
-            sentiment: classifications.sentiment,
-            priority: classifications.priority,
-            summary: classifications.summary,
-            next_action: classifications.next_action,
-            classified_by: classifications.classified_by,
-            model_version: classifications.model_version,
-            classified_at: classifications.classified_at,
-          },
-        })
-        .from(conversations)
-        .leftJoin(classifications, eq(conversations.id, classifications.conversation_id))
-        .where(conditions.length > 0 ? and(...conditions) : undefined)
-        .orderBy(desc(conversations.last_message_at))
-        .limit(limit)
-        .offset(offset);
-
-      const rows = query.all();
-      res.json(rows);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // GET /conversations/:id
-  // -------------------------------------------------------------------------
-  app.get('/conversations/:id', (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { id } = req.params;
-
-      const conversation = db
-        .select()
-        .from(conversations)
-        .where(eq(conversations.id, id))
-        .get();
-
-      if (conversation === undefined) {
-        res.status(404).json({ error: 'Conversa não encontrada' });
-        return;
-      }
-
-      const classification = db
-        .select()
-        .from(classifications)
-        .where(eq(classifications.conversation_id, id))
-        .get();
-
-      const recentMessages = db
-        .select()
-        .from(messages)
-        .where(eq(messages.chat_id, id))
-        .orderBy(desc(messages.timestamp))
-        .limit(50)
-        .all();
-
-      const history = db
-        .select()
-        .from(classificationHistory)
-        .where(eq(classificationHistory.conversation_id, id))
-        .orderBy(desc(classificationHistory.classified_at))
-        .all();
-
-      res.json({
-        ...conversation,
-        classification: classification ?? null,
-        messages: recentMessages,
-        classification_history: history,
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // PATCH /conversations/:id/classify
-  // -------------------------------------------------------------------------
-  app.patch('/conversations/:id/classify', (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { id } = req.params;
-
-      const conversation = db
-        .select({ id: conversations.id })
-        .from(conversations)
-        .where(eq(conversations.id, id))
-        .get();
-
-      if (conversation === undefined) {
-        res.status(404).json({ error: 'Conversa não encontrada' });
-        return;
-      }
-
-      const body = req.body as Partial<ClassificationResult>;
-
-      // Fetch current classification as defaults for omitted fields
-      const current = db
-        .select()
-        .from(classifications)
-        .where(eq(classifications.conversation_id, id))
-        .get();
-
-      const result: ClassificationResult = {
-        status: body.status ?? current?.status as ClassificationResult['status'] ?? 'indefinido',
-        intent: body.intent !== undefined ? body.intent : (current?.intent as ClassificationResult['intent'] ?? null),
-        sentiment: body.sentiment ?? current?.sentiment as ClassificationResult['sentiment'] ?? 'neutro',
-        priority: body.priority ?? current?.priority as ClassificationResult['priority'] ?? 3,
-        summary: body.summary ?? current?.summary ?? '',
-        next_action: body.next_action ?? current?.next_action ?? '',
-        classified_by: 'manual',
-        confidence: 1,
-      };
-
-      saveClassification(db, id, result);
-
-      const updated = db
-        .select()
-        .from(classifications)
-        .where(eq(classifications.conversation_id, id))
-        .get();
-
-      res.json(updated ?? null);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // GET /stats/summary
-  // -------------------------------------------------------------------------
-  app.get('/stats/summary', (_req: Request, res: Response, next: NextFunction) => {
-    try {
+      // Total para paginação
       const totalRow = db
         .select({ count: sql<number>`count(*)` })
         .from(conversations)
+        .where(whereClause)
         .get();
-      const total_conversations = totalRow?.count ?? 0;
+      const total = totalRow?.count ?? 0;
 
-      // Unclassified: conversations with no classification row
-      const unclassifiedRow = db
-        .select({ count: sql<number>`count(*)` })
-        .from(conversations)
-        .leftJoin(classifications, eq(conversations.id, classifications.conversation_id))
-        .where(isNull(classifications.id))
-        .get();
-      const unclassified = unclassifiedRow?.count ?? 0;
-
-      // Count by status
-      const statusRows = db
-        .select({
-          status: classifications.status,
-          count: sql<number>`count(*)`,
-        })
-        .from(classifications)
-        .groupBy(classifications.status)
-        .all();
-
-      const by_status: Record<string, number> = {};
-      for (const row of statusRows) {
-        by_status[row.status] = row.count;
-      }
-
-      // Count by priority
-      const priorityRows = db
-        .select({
-          priority: classifications.priority,
-          count: sql<number>`count(*)`,
-        })
-        .from(classifications)
-        .groupBy(classifications.priority)
-        .all();
-
-      const by_priority: Record<string, number> = {};
-      for (const row of priorityRows) {
-        if (row.priority !== null) {
-          by_priority[String(row.priority)] = row.count;
-        }
-      }
-
-      // Last sync run
-      const lastSync = db
-        .select({
-          started_at: syncRuns.started_at,
-          finished_at: syncRuns.finished_at,
-          status: syncRuns.status,
-        })
-        .from(syncRuns)
-        .orderBy(desc(syncRuns.started_at))
-        .limit(1)
-        .get();
-
-      res.json({
-        total_conversations,
-        by_status,
-        by_priority,
-        unclassified,
-        last_sync: lastSync ?? null,
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // GET /sync-runs
-  // -------------------------------------------------------------------------
-  app.get('/sync-runs', (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const limit = clamp(parseIntParam(req.query['limit'], 20), 1, 100);
-      const offset = Math.max(0, parseIntParam(req.query['offset'], 0));
-
+      // Conversas paginadas com join em contacts
       const rows = db
-        .select()
-        .from(syncRuns)
-        .orderBy(desc(syncRuns.started_at))
+        .select({
+          id: conversations.id,
+          is_group: conversations.is_group,
+          last_message_at: conversations.last_message_at,
+          unread_count: conversations.unread_count,
+          contact_id: conversations.contact_id,
+          contact_name: contacts.name,
+          contact_push_name: contacts.push_name,
+          contact_is_business: contacts.is_business,
+          contact_avatar_url: contacts.avatar_url,
+        })
+        .from(conversations)
+        .leftJoin(contacts, eq(conversations.contact_id, contacts.id))
+        .where(whereClause)
+        .orderBy(desc(conversations.last_message_at))
         .limit(limit)
         .offset(offset)
         .all();
 
-      res.json(rows);
+      const data: ConversationSummary[] = rows.map((row) => {
+        // message_count via subquery
+        const countRow = db
+          .select({ count: sql<number>`count(*)` })
+          .from(messages)
+          .where(eq(messages.chat_id, row.id))
+          .get();
+
+        // 10 mensagens mais recentes
+        const sampleRows = db
+          .select({
+            id: messages.id,
+            from_me: messages.from_me,
+            sender_jid: messages.sender_jid,
+            chat_id: messages.chat_id,
+            message_type: messages.message_type,
+            text: messages.text,
+            timestamp: messages.timestamp,
+            has_media: messages.has_media,
+          })
+          .from(messages)
+          .where(eq(messages.chat_id, row.id))
+          .orderBy(desc(messages.timestamp))
+          .limit(10)
+          .all();
+
+        const contact: ApiContact = row.contact_id
+          ? {
+              phone: toE164(row.contact_id),
+              name: row.contact_name,
+              push_name: row.contact_push_name,
+              is_business: (row.contact_is_business ?? 0) === 1,
+              avatar_url: row.contact_avatar_url,
+            }
+          : UNKNOWN_CONTACT;
+
+        return {
+          conversation_id: row.id,
+          type: row.is_group === 1 ? 'group' : 'individual',
+          contact,
+          last_message_at: row.last_message_at
+            ? new Date(row.last_message_at).toISOString()
+            : new Date(0).toISOString(),
+          message_count: countRow?.count ?? 0,
+          unread_count: row.unread_count ?? 0,
+          sample_messages: sampleRows.map(buildApiMessage),
+        };
+      });
+
+      const lastItem = rows[rows.length - 1];
+      const nextCursor = lastItem?.last_message_at
+        ? new Date(lastItem.last_message_at).toISOString()
+        : null;
+
+      const response: PaginatedSummaryResponse = {
+        data,
+        pagination: {
+          page,
+          limit,
+          total,
+          has_next: offset + rows.length < total,
+          next_cursor: nextCursor,
+        },
+      };
+
+      res.json(response);
     } catch (err) {
       next(err);
     }
   });
 
   // -------------------------------------------------------------------------
-  // POST /sync/trigger
+  // GET /conversations/updated
+  // Sync incremental — conversas atualizadas após "since".
+  // IMPORTANTE: registrar ANTES de /conversations/:id para evitar conflito de rota.
   // -------------------------------------------------------------------------
-  app.post('/sync/trigger', (_req: Request, res: Response, next: NextFunction) => {
+  app.get('/conversations/updated', (req: Request, res: Response, next: NextFunction) => {
     try {
-      if (isLocked('incremental-sync')) {
-        res.status(409).json({ message: 'Sync já em andamento' });
+      const sinceRaw = req.query['since'];
+      if (!sinceRaw) {
+        res.status(400).json({ error: 'Parâmetro "since" obrigatório (ISO 8601)' });
         return;
       }
 
-      // Fire and forget — do not await so the response is immediate.
-      runWithLock('incremental-sync', () => runIncrementalSync(db)).catch((err: unknown) => {
-        console.error('[dashboard] sync/trigger error:', err);
-      });
+      const sinceMs = new Date(String(sinceRaw)).getTime();
+      if (!Number.isFinite(sinceMs)) {
+        res.status(400).json({ error: 'Formato inválido para "since" — use ISO 8601' });
+        return;
+      }
 
-      res.status(202).json({ message: 'Sync iniciado' });
+      const limit = clamp(parseIntParam(req.query['limit'], 50), 1, 100);
+
+      const rows = db
+        .select({
+          id: conversations.id,
+          last_message_at: conversations.last_message_at,
+        })
+        .from(conversations)
+        .where(gte(conversations.last_message_at, sinceMs))
+        .orderBy(conversations.last_message_at)
+        .limit(limit)
+        .all();
+
+      const lastItem = rows[rows.length - 1];
+      const syncToken = lastItem?.last_message_at
+        ? new Date(lastItem.last_message_at).toISOString()
+        : null;
+
+      const response: IncrementalSyncResponse = {
+        data: rows.map((r) => ({
+          conversation_id: r.id,
+          last_message_at: r.last_message_at
+            ? new Date(r.last_message_at).toISOString()
+            : new Date(0).toISOString(),
+        })),
+        sync_token: syncToken,
+      };
+
+      res.json(response);
     } catch (err) {
       next(err);
     }
   });
 
   // -------------------------------------------------------------------------
-  // GET /qr — serves the QR scan page
+  // GET /conversations/:id/full
+  // Histórico completo com paginação por cursor "before".
   // -------------------------------------------------------------------------
-  app.get('/qr', (_req: Request, res: Response) => {
-    res.sendFile(path.join(import.meta.dirname, 'frontend', 'qr.html'));
+  app.get('/conversations/:id/full', (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { id } = req.params;
+      const msgLimit = clamp(parseIntParam(req.query['limit'], 200), 1, 500);
+      const beforeRaw = req.query['before'];
+      const beforeMs = beforeRaw ? new Date(String(beforeRaw)).getTime() : null;
+
+      const conv = db
+        .select({
+          id: conversations.id,
+          is_group: conversations.is_group,
+          last_message_at: conversations.last_message_at,
+          created_at: conversations.created_at,
+          unread_count: conversations.unread_count,
+          contact_id: conversations.contact_id,
+        })
+        .from(conversations)
+        .where(eq(conversations.id, id))
+        .get();
+
+      if (!conv) {
+        res.status(404).json({ error: 'Conversa não encontrada' });
+        return;
+      }
+
+      // Buscar contato completo (com about)
+      const contactRow = conv.contact_id
+        ? db.select().from(contacts).where(eq(contacts.id, conv.contact_id)).get()
+        : null;
+
+      const contact: ApiContactFull = contactRow
+        ? buildApiContactFull(contactRow)
+        : UNKNOWN_CONTACT;
+
+      // Total de mensagens
+      const countRow = db
+        .select({ count: sql<number>`count(*)` })
+        .from(messages)
+        .where(eq(messages.chat_id, id))
+        .get();
+
+      // Mensagens com cursor before
+      const msgWhere = beforeMs && Number.isFinite(beforeMs)
+        ? and(eq(messages.chat_id, id), lt(messages.timestamp, beforeMs))
+        : eq(messages.chat_id, id);
+
+      const msgRows = db
+        .select({
+          id: messages.id,
+          from_me: messages.from_me,
+          sender_jid: messages.sender_jid,
+          chat_id: messages.chat_id,
+          message_type: messages.message_type,
+          text: messages.text,
+          timestamp: messages.timestamp,
+          has_media: messages.has_media,
+          media_url: messages.media_url,
+          media_mime: messages.media_mime,
+          quoted_message_id: messages.quoted_message_id,
+          is_forwarded: messages.is_forwarded,
+        })
+        .from(messages)
+        .where(msgWhere)
+        .orderBy(desc(messages.timestamp))
+        .limit(msgLimit)
+        .all();
+
+      const response: ConversationFull = {
+        conversation_id: conv.id,
+        type: conv.is_group === 1 ? 'group' : 'individual',
+        contact,
+        created_at: new Date(conv.created_at).toISOString(),
+        last_message_at: conv.last_message_at
+          ? new Date(conv.last_message_at).toISOString()
+          : new Date(0).toISOString(),
+        message_count: countRow?.count ?? 0,
+        messages: msgRows.map(buildApiMessageFull),
+      };
+
+      res.json(response);
+    } catch (err) {
+      next(err);
+    }
   });
 
   // -------------------------------------------------------------------------
-  // GET /auth/qr — returns current QR string for web-based scanning
+  // GET /auth/qr — estado da conexão para diagnóstico
   // -------------------------------------------------------------------------
   app.get('/auth/qr', (_req: Request, res: Response) => {
     res.json({ status: whatsappStatus, qr: currentQr });
   });
 
   // -------------------------------------------------------------------------
+  // GET /qr — página HTML de scan (mantida para debug)
+  // -------------------------------------------------------------------------
+  app.get('/qr', (_req: Request, res: Response) => {
+    res.sendFile(path.join(import.meta.dirname, 'frontend', 'qr.html'));
+  });
+
+  // -------------------------------------------------------------------------
   // Error handler
   // -------------------------------------------------------------------------
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    console.error('[dashboard] Unhandled error:', err);
+    console.error('[api] Unhandled error:', err);
     const message = err instanceof Error ? err.message : 'Erro interno';
     res.status(500).json({ error: message });
   });
@@ -377,13 +439,13 @@ export function createApp(): express.Application {
   return app;
 }
 
-// ---------------------------------------------------------------------------
-// startDashboard
-// ---------------------------------------------------------------------------
-
 export function startDashboard(port = Number(process.env['PORT']) || 3000): void {
   const app = createApp();
   app.listen(port, () => {
-    console.log(`[dashboard] API rodando em http://localhost:${port}`);
+    console.log(`[api] REST API rodando em http://localhost:${port}`);
+    console.log(`[api] Endpoints:`);
+    console.log(`[api]   GET /conversations/summary?page=1&limit=50&since=ISO8601`);
+    console.log(`[api]   GET /conversations/updated?since=ISO8601&limit=50`);
+    console.log(`[api]   GET /conversations/:id/full?limit=200&before=ISO8601`);
   });
 }
