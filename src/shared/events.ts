@@ -7,13 +7,19 @@ import { EventEmitter } from 'node:events'
 
 export interface MessageReceivedEvent {
   id: string
-  chatId: string        // full JID, e.g. "5511999999999@s.whatsapp.net"
+  chatId: string
+  senderJid: string | null   // JID do remetente em grupos; null se from_me
   fromMe: boolean
-  timestamp: number     // Unix ms
+  timestamp: number          // Unix ms
   text: string | null
-  messageType: string   // "conversation", "imageMessage", etc.
-  rawPayload: string    // JSON.stringify of the raw Baileys object
-  type: 'notify' | 'append' | 'resume' | 'last' // notify = new message, append = history, resume/last = Baileys internal
+  messageType: string
+  hasMedia: boolean
+  mediaUrl: string | null
+  mediaMime: string | null
+  isForwarded: boolean
+  quotedMessageId: string | null
+  rawPayload: string
+  type: string               // Baileys upsert type: "notify" | "append"
 }
 
 export interface ChatUpdatedEvent {
@@ -24,10 +30,13 @@ export interface ChatUpdatedEvent {
 }
 
 export interface ContactUpdatedEvent {
-  id: string            // clean phone number (no JID suffix)
+  id: string
   name: string | null
+  pushName: string | null     // contact.notify
   displayName: string | null
   isBusiness: boolean
+  avatarUrl: string | null
+  about: string | null        // contact.status
 }
 
 // ---------------------------------------------------------------------------
