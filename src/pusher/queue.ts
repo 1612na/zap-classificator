@@ -2,7 +2,7 @@
 // Funções de baixo nível para gerenciar a push_queue no SQLite.
 // Sem lógica de retry ou HTTP — apenas enqueue/dequeue.
 
-import { eq, lte, and, inArray } from 'drizzle-orm';
+import { eq, lte, and, inArray, sql } from 'drizzle-orm';
 import { pushQueue } from '../banco/schema.js';
 import type { Database } from '../banco/db.js';
 
@@ -128,10 +128,10 @@ export function markRetry(db: Database, id: number, attempts: number, error: str
 // ---------------------------------------------------------------------------
 
 export function pendingCount(db: Database): number {
-  const row = db
-    .select({ count: pushQueue.id })
+  const result = db
+    .select({ count: sql<number>`count(*)` })
     .from(pushQueue)
     .where(eq(pushQueue.status, 'pending'))
-    .all();
-  return row.length;
+    .get();
+  return result?.count ?? 0;
 }
