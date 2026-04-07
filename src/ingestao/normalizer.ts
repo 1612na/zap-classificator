@@ -11,37 +11,26 @@ import type {
 
 export type { NormalizedMessage, NormalizedChat, NormalizedContact };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Extracts the numeric part before "@" from a JID.
- * Returns null for group JIDs (ending in @g.us) because they have no single
- * contact owner.
- *
- * Examples:
- *   "5511999999999@s.whatsapp.net" → "5511999999999"
- *   "5511999999999@g.us"          → null
- */
 function extractContactId(jid: string): string | null {
   if (jid.endsWith('@g.us')) return null;
   const atIndex = jid.indexOf('@');
   return atIndex === -1 ? jid : jid.slice(0, atIndex);
 }
 
-// ---------------------------------------------------------------------------
-// Pure normalizer functions
-// ---------------------------------------------------------------------------
-
 export function normalizeMessage(event: MessageReceivedEvent): NormalizedMessage {
   return {
     id: event.id,
     chat_id: event.chatId,
+    sender_jid: event.senderJid,
     from_me: event.fromMe ? 1 : 0,
     timestamp: event.timestamp,
     text: event.text,
     message_type: event.messageType,
+    has_media: event.hasMedia ? 1 : 0,
+    media_url: event.mediaUrl,
+    media_mime: event.mediaMime,
+    is_forwarded: event.isForwarded ? 1 : 0,
+    quoted_message_id: event.quotedMessageId,
     raw_payload: event.rawPayload,
     created_at: Date.now(),
   };
@@ -67,8 +56,11 @@ export function normalizeContact(event: ContactUpdatedEvent): NormalizedContact 
   return {
     id: event.id,
     name: event.name,
+    push_name: event.pushName,
     display_name: event.displayName,
     is_business: event.isBusiness ? 1 : 0,
+    avatar_url: event.avatarUrl,
+    about: event.about,
     created_at: now,
     updated_at: now,
   };
