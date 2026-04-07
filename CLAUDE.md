@@ -193,32 +193,32 @@ data/
 
 ---
 
-## Estado atual (atualizado em 2026-04-02)
+## Estado atual (atualizado em 2026-04-07)
 
-### Sprint em andamento: **Sprint 1 — Fundação**
+### Versão em andamento: **Collector API para CRM IR Audit (Manus IA)**
 
-#### Arquivos implementados:
-- [x] `src/shared/events.ts` — contratos de eventos (EventBus, MessageReceivedEvent, ChatUpdatedEvent)
-- [x] `src/banco/schema.ts` — schema drizzle com as 6 tabelas e índices
-- [x] `src/banco/db.ts` — instância do banco SQLite
-- [x] `src/whatsapp/auth.ts` — autenticação Baileys com backoff exponencial
+#### Responsabilidade do sistema
+- Coletar dados WhatsApp via Baileys (somente leitura)
+- Normalizar e persistir no SQLite
+- Expor API REST para consumo pelo CRM Manus
 
-#### Pendente para concluir Sprint 1:
-- [ ] `src/whatsapp/listener.ts` — registrar os 3 eventos Baileys (`messages.upsert`, `chats.upsert`, `contacts.upsert`) e emitir eventos de domínio via EventBus
-- [ ] `src/index.ts` — entry point que inicializa auth + listener + banco
-- [ ] Gate de aprovação: QR scan funciona → `connection.open` dispara → DB criado → eventos loggados no console
+#### Classificação: feita 100% pelo Manus — não implementada aqui
 
-#### Sprints futuras:
-- [ ] Sprint 2 — Pipeline de Ingestão (`ingestao/normalizer.ts`, `banco/repository.ts`)
-- [ ] Sprint 3 — Motor de Classificação (`classificacao/`, `scheduler/debounce.ts`)
-- [ ] Sprint 4 — Scheduler + Dashboard (`scheduler/`, `dashboard/`)
+#### Endpoints implementados:
+- `GET /conversations/summary?page=&limit=&since=` — triagem paginada (50/req)
+- `GET /conversations/updated?since=&limit=` — sync incremental com sync_token
+- `GET /conversations/:id/full?limit=&before=` — histórico completo com cursor
+
+#### Módulos removidos:
+- `src/classificacao/` — removido (Manus classifica)
+- `src/scheduler/` — removido (Manus puxa via polling a cada 2min)
+- `src/dashboard/frontend/app.js` — removido (Manus tem dashboard próprio)
 
 ---
 
 ## Protocolo de validação antes de cada entrega
 
 1. `npm run typecheck` — zero erros TypeScript
-2. `npm test` — todos os testes passando
-3. `npm run lint` — zero warnings
-4. Teste de idempotência manual: reprocessar mesmo evento → sem duplicatas no banco
-5. Para sprint 3+: verificar `classification_history` tem registro de cada classificação
+2. `npm run lint` — zero warnings
+3. Teste de idempotência manual: reprocessar mesmo evento → sem duplicatas no banco
+4. Verificar endpoints REST via curl: `GET /conversations/summary`, `GET /conversations/updated?since=...`, `GET /conversations/:id/full`
