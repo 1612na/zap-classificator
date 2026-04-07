@@ -1,6 +1,6 @@
 # zap-classificator
 
-Sistema local de leitura, sincronização e classificação de conversas WhatsApp via Baileys.
+Coletor local de dados WhatsApp via Baileys que expõe uma API REST para consumo pelo CRM IR Audit (Manus IA).
 
 > **Somente leitura** — o sistema nunca envia mensagens.
 
@@ -10,9 +10,8 @@ Sistema local de leitura, sincronização e classificação de conversas WhatsAp
 
 - Conecta ao WhatsApp via QR code e escuta mensagens em tempo real
 - Persiste conversas, mensagens e contatos em SQLite local
-- Classifica conversas automaticamente (regras + LLM) em categorias como `lead_quente`, `suporte`, `cliente_ativo`, etc.
-- Executa ciclos automáticos de sincronização e classificação via cron
-- Expõe dashboard web para visualização e override manual de classificações
+- Expõe API REST para que o Manus faça triagem, sync incremental e leitura de histórico completo
+- Toda classificação é responsabilidade do Manus — este sistema apenas coleta e serve dados
 
 ---
 
@@ -30,15 +29,7 @@ node --version   # precisa ser >= 20
 brew install node
 
 # Ou via nvm
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-nvm install 20
-nvm use 20
-```
-
-**Git**
-
-```bash
-xcode-select --install   # instala git junto com as command line tools
+nvm install 20 && nvm use 20
 ```
 
 ---
@@ -53,27 +44,14 @@ npm install
 
 ---
 
-### 3. Configurar variáveis de ambiente
-
-Criar o arquivo `.env` na raiz do projeto:
+### 3. Variáveis de ambiente (opcional)
 
 ```bash
-cp .env.example .env   # se existir
-# ou criar manualmente:
-touch .env
-```
-
-Editar `.env` com:
-
-```env
-# Obrigatório para classificação LLM (https://console.anthropic.com)
-ANTHROPIC_API_KEY=sk-ant-...
-
-# Opcional — porta do dashboard (padrão: 3000)
+# Opcional — porta da API (padrão: 3000)
 PORT=3000
 ```
 
-> A chave Anthropic só é necessária quando a classificação por regras não é suficiente (confidence < 0.75 + conversa com ≥ 3 mensagens e ≥ 50 chars). O sistema funciona sem ela, mas conversas ambíguas ficam marcadas como `indefinido`.
+Não é necessária nenhuma chave de API externa. O sistema é 100% local.
 
 ---
 
@@ -83,11 +61,11 @@ PORT=3000
 npm run db:migrate
 ```
 
-Isso cria o arquivo `data/db.sqlite` com todas as tabelas e índices. Pode ser rodado novamente sem problemas (idempotente).
+Cria `data/db.sqlite` com o schema atual. Idempotente — pode ser rodado novamente sem problemas.
 
 ---
 
-### 5. Iniciar o sistema
+### 5. Iniciar
 
 ```bash
 npm run dev
@@ -96,10 +74,10 @@ npm run dev
 Na primeira execução, um QR code aparece no terminal:
 
 ```
+[index] Banco de dados inicializado
+[api] REST API rodando em http://localhost:3000
+[index] Iniciando conexão WhatsApp…
 Escaneie o QR code para autenticar
-█████████████████
-█ ▄▄▄▄▄ █▀ █ ...
-...
 ```
 
 **Para autenticar:**
@@ -107,40 +85,88 @@ Escaneie o QR code para autenticar
 2. Ir em **Configurações → Dispositivos conectados → Conectar dispositivo**
 3. Escanear o QR code
 
-Após o scan:
+---
 
-```
-WhatsApp conectado com sucesso
-[index] Banco de dados inicializado
-[dashboard] API rodando em http://localhost:3000
+## API REST
+
+Base URL: `http://localhost:3000`
+
+### `GET /conversations/summary`
+
+Triagem paginada de conversas com 10 mensagens de amostra por conversa.
+
+| Parâmetro | Tipo | Padrão | Descrição |
+|-----------|------|--------|-----------|
+| `page` | int | 1 | Página |
+| `limit` | int | 50 | Itens por página (máx 100) |
+| `since` | ISO 8601 | — | Filtrar conversas atualizadas após esta data |
+
+```bash
+curl "http://localhost:3000/conversations/summary?page=1&limit=50"
+curl "http://localhost:3000/conversations/summary?since=2026-04-01T00:00:00Z"
 ```
 
 ---
 
-### 6. Acessar o dashboard
+### `GET /conversations/updated`
 
-Abrir no navegador: **http://localhost:3000**
+Sync incremental — retorna apenas conversas atualizadas após `since`.
 
-O dashboard exibe:
-- Resumo de conversas por status
-- Lista filtrável por status, prioridade, intenção e origem da classificação
-- Detalhe de cada conversa com mensagens e histórico de classificações
-- Botão para override manual de classificação
-- Botão para disparar sincronização manual
+| Parâmetro | Tipo | Obrigatório | Descrição |
+|-----------|------|-------------|-----------|
+| `since` | ISO 8601 | **sim** | Timestamp do último sync |
+| `limit` | int | 50 | Máx 100 |
+
+Retorna `sync_token` para usar como próximo `since`.
+
+```bash
+curl "http://localhost:3000/conversations/updated?since=2026-04-07T10:00:00Z"
+```
+
+---
+
+### `GET /conversations/:id/full`
+
+Histórico completo de uma conversa com paginação por cursor.
+
+| Parâmetro | Tipo | Padrão | Descrição |
+|-----------|------|--------|-----------|
+| `limit` | int | 200 | Máx 500 mensagens |
+| `before` | ISO 8601 | — | Cursor: mensagens anteriores a esta data |
+
+```bash
+curl "http://localhost:3000/conversations/5511999998888@s.whatsapp.net/full"
+curl "http://localhost:3000/conversations/5511999998888@s.whatsapp.net/full?before=2026-04-07T12:00:00Z"
+```
+
+---
+
+### `GET /auth/qr`
+
+Estado da conexão WhatsApp.
+
+```json
+{ "status": "connected", "qr": null }
+{ "status": "pending",   "qr": "2@abc123..." }
+```
+
+---
+
+### `GET /qr`
+
+Página HTML com QR code para autenticação via browser.
 
 ---
 
 ## Comandos disponíveis
 
 ```bash
-npm run dev           # inicia o sistema completo (WhatsApp + scheduler + dashboard)
-npm run dev:baileys   # apenas conexão WhatsApp (sem dashboard)
+npm run dev           # inicia o sistema (WhatsApp + API)
 npm run db:migrate    # aplica migrations pendentes
-npm run db:studio     # abre Drizzle Studio para inspecionar o banco visualmente
+npm run db:studio     # abre Drizzle Studio para inspecionar o banco
 npm run db:generate   # gera nova migration após alterar src/banco/schema.ts
-npm run typecheck     # verifica erros TypeScript (sem compilar)
+npm run typecheck     # verifica erros TypeScript
 npm run lint          # ESLint
-npm test              # testes unitários
 ```
 
 ---
@@ -151,14 +177,25 @@ npm test              # testes unitários
 data/
 ├── auth/       # credenciais da sessão WhatsApp (gerado no primeiro login)
 ├── db.sqlite   # banco principal
-└── logs/       # logs opcionais de sync_runs
+└── logs/       # sync_runs logs opcionais
 ```
 
 > **Nunca commitar `data/auth/`** — contém as credenciais da conta WhatsApp.
 
 ---
 
-## Re-autenticar (trocar de conta ou sessão expirada)
+## Schema SQLite
+
+| Tabela | Descrição |
+|--------|-----------|
+| `contacts` | Contatos com nome, push_name, is_business, about |
+| `conversations` | Chats (JID completo como PK), com last_message_at e unread_count |
+| `messages` | Mensagens com campos de mídia, from_me, sender_jid, is_forwarded |
+| `sync_runs` | Log de execuções para diagnóstico |
+
+---
+
+## Re-autenticar
 
 Se o QR code não aparecer ou a conexão falhar com "loggedOut":
 
@@ -169,54 +206,19 @@ npm run dev   # novo QR code será gerado
 
 ---
 
-## Entender as classificações
-
-| Status | Significado |
-|--------|-------------|
-| `lead_quente` | Interesse em compra detectado |
-| `lead_frio` | Contato inicial sem intenção clara |
-| `cliente_ativo` | Histórico de compras identificado |
-| `suporte` | Problema ou dúvida técnica |
-| `encerrado` | Conversa finalizada |
-| `indefinido` | Não foi possível classificar |
-
-**Prioridades:** 1 (alta) → 2 (média) → 3 (baixa)
-
-**Origem da classificação:**
-- `rules` — classificado por regex local (instantâneo, sem custo)
-- `llm` — classificado pela API Anthropic (para conversas ambíguas)
-- `manual` — override feito pelo operador no dashboard (nunca sobrescrito automaticamente)
-
----
-
-## Scheduler automático
-
-| Job | Frequência | O que faz |
-|-----|-----------|-----------|
-| Sync incremental | A cada 30 min | Reclassifica conversas novas ou com erros anteriores |
-| Batch completo | A cada 1 hora | Reclassifica conversas ativas das últimas 2 horas |
-
-O histórico de execuções fica visível no dashboard em **Sync Runs**.
-
----
-
 ## Solução de problemas
 
 **QR code não aparece**
-- Verificar se `data/auth/` está vazio ou não existe
-- Rodar `rm -rf data/auth/ && npm run dev`
+```bash
+rm -rf data/auth/ && npm run dev
+```
 
 **"Sessão substituída por outro dispositivo"**
-- Outro dispositivo ou instância do sistema assumiu a sessão
-- Encerrar todas as instâncias e reconectar manualmente
+- Encerrar todas as instâncias e reconectar
 
-**Classificações sempre `indefinido`**
-- Verificar se `ANTHROPIC_API_KEY` está configurada no `.env`
-- Conversas com menos de 3 mensagens ou menos de 50 caracteres são classificadas como `indefinido` por design
-
-**Banco corrompido ou schema desatualizado**
+**Banco desatualizado após atualização**
 ```bash
-npm run db:migrate   # aplica migrations pendentes
+npm run db:migrate
 ```
 
 **Porta 3000 já em uso**
