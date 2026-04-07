@@ -225,4 +225,96 @@ export function registerListeners(sock: WASocket): void {
       console.log(`[listener] contact:updated  id=${event.id}  name=${event.name ?? '(sem nome)'}`)
     }
   })
+
+  // ── messaging-history.set (sync inicial de histórico) ────────────────────
+  // Dispara apenas quando SYNC_FULL_HISTORY=true na primeira conexão.
+  sock.ev.on('messaging-history.set', ({ messages: histMsgs, chats: histChats, contacts: histContacts, isLatest }) => {
+    console.log(`[listener] history.set  chats=${histChats.length}  msgs=${histMsgs.length}  contacts=${histContacts.length}  isLatest=${isLatest}`)
+
+    // Contatos históricos
+    for (const contact of histContacts) {
+      if (!contact.id) continue
+      const c = contact as unknown as Record<string, unknown>
+      bus.emit('contact:updated', {
+        id: cleanJid(contact.id),
+        name: contact.name ?? null,
+        pushName: (contact as Record<string, unknown>)['notify'] as string ?? null,
+        displayName: (c['verifiedName'] as string | undefined) ?? null,
+        isBusiness: Boolean(c['isBusiness']),
+        avatarUrl: null,
+        about: (c['status'] as string | undefined) ?? null,
+      })
+    }
+
+    // Chats históricos
+    for (const chat of histChats) {
+      if (!chat.id || chat.id.endsWith('@g.us')) continue
+      const tsRaw = chat.conversationTimestamp
+      const lastMessageTime =
+        tsRaw == null ? null : (typeof tsRaw === 'number' ? tsRaw : Number(tsRaw)) * 1000
+      bus.emit('chat:updated', {
+        id: chat.id,
+        name: chat.name ?? null,
+        unreadCount: chat.unreadCount ?? 0,
+        lastMessageTime,
+      })
+    }
+
+    // Mensagens históricas
+    for (const msg of histMsgs) {
+      const { id, remoteJid, fromMe, participant } = msg.key
+      if (!id || !remoteJid) continue
+      if (remoteJid.endsWith('@g.us')) continue
+
+      const msgType = getMessageType(msg.message)
+      const SYSTEM_TYPES = new Set([
+        'protocolMessage', 'senderKeyDistributionMessage', 'reactionMessage',
+        'pollUpdateMessage', 'callLogMesssage', 'ephemeralSetting',
+      ])
+      if (SYSTEM_TYPES.has(msgType)) continue
+
+      const tsRaw = msg.messageTimestamp
+      const tsMs = tsRaw == null
+        ? Date.now()
+        : (typeof tsRaw === 'number' ? tsRaw : Number(tsRaw)) * 1000
+
+      const contextInfo = getContextInfo(msg.message)
+      const senderJid = fromMe ? null : (participant ?? remoteJid)
+
+      bus.emit('message:received', {
+        id,
+        chatId: remoteJid,
+        senderJid,
+        fromMe: fromMe ?? false,
+        timestamp: tsMs,
+        text: extractText(msg.message),
+        messageType: msgType,
+        hasMedia: hasMedia(msgType),
+        mediaUrl: getMediaUrl(msg.message, msgType),
+        mediaMime: getMediaMime(msg.message, msgType),
+        isForwarded: Boolean(contextInfo?.isForwarded),
+        quotedMessageId: contextInfo?.stanzaId ?? null,
+        rawPayload: JSON.stringify(msg),
+        type: 'notify',
+      })
+
+      // Captura push_name do remetente
+      if (!fromMe && msg.pushName) {
+        const contactId = cleanJid(senderJid ?? remoteJid)
+        bus.emit('contact:updated', {
+          id: contactId,
+          name: null,
+          pushName: msg.pushName,
+          displayName: null,
+          isBusiness: false,
+          avatarUrl: null,
+          about: null,
+        })
+      }
+    }
+
+    if (isLatest) {
+      console.log('[listener] history.set completo — sync histórico finalizado')
+    }
+  })
 }

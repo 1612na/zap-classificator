@@ -56,8 +56,9 @@ export async function createConnection(attempt = 1): Promise<void> {
     auth: state,
     version,
     browser: Browsers.macOS('Chrome'),
-    // ----- critical flags — never change -----
-    syncFullHistory: false,
+    // syncFullHistory: ativar apenas para carga inicial do histórico.
+    // Em produção manter false para evitar ban. Controlar via env SYNC_FULL_HISTORY=true.
+    syncFullHistory: process.env['SYNC_FULL_HISTORY'] === 'true',
     markOnlineOnConnect: false,
     generateHighQualityLinkPreview: false,
   })
