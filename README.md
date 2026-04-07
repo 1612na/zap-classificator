@@ -1,169 +1,155 @@
-# zap-classificator
+# zap-classificator — Coletor Local WhatsApp
 
-Coletor local de dados WhatsApp via Baileys que expõe uma API REST para consumo pelo CRM IR Audit (Manus IA).
+Coleta conversas do WhatsApp via Baileys, persiste em SQLite local e envia os dados para a [zap-api](https://github.com/1612na/zap-api) no Render. O Manus CRM consome os dados diretamente da zap-api.
 
 > **Somente leitura** — o sistema nunca envia mensagens.
 
+```
+[WhatsApp] ──Baileys──▶ [Este coletor] ──POST a cada 30s──▶ [zap-api no Render]
+                              │                                       │
+                           SQLite                              PostgreSQL
+                         (buffer local)                               │
+                                                              [Manus CRM]
+```
+
 ---
 
-## O que faz
+## Pré-requisitos
 
-- Conecta ao WhatsApp via QR code e escuta mensagens em tempo real
-- Persiste conversas, mensagens e contatos em SQLite local
-- Expõe API REST para que o Manus faça triagem, sync incremental e leitura de histórico completo
-- Toda classificação é responsabilidade do Manus — este sistema apenas coleta e serve dados
+- **Node.js 20+** — verificar com `node --version`
+- **Conta WhatsApp** no celular para escanear o QR
+- **zap-api** no Render já deployada — você precisará da URL e da API Key
 
----
-
-## Quickstart — Mac limpo
-
-### 1. Pré-requisitos
-
-**Node.js 20+**
-
+**Instalar Node.js:**
 ```bash
-# Verificar se já tem
-node --version   # precisa ser >= 20
-
-# Instalar via Homebrew (se não tiver)
+# via Homebrew (Mac)
 brew install node
 
-# Ou via nvm
+# ou via nvm
 nvm install 20 && nvm use 20
 ```
 
 ---
 
-### 2. Clonar e instalar
+## Instalação do zero
+
+### 1. Clonar e instalar dependências
 
 ```bash
-git clone <url-do-repositorio>
+git clone https://github.com/1612na/zap-classificator.git
 cd zap-classificator
 npm install
 ```
 
 ---
 
-### 3. Variáveis de ambiente (opcional)
+### 2. Configurar variáveis de ambiente
 
 ```bash
-# Opcional — porta da API (padrão: 3000)
+cp .env.example .env
+```
+
+Abrir o `.env` e preencher:
+
+```env
+# URL da zap-api no Render (sem barra no final)
+RENDER_API_URL=https://zap-api-uyyw.onrender.com
+
+# Mesma chave configurada em COLLECTOR_API_KEY na zap-api
+RENDER_API_KEY=sua-chave-secreta-aqui
+
+# Porta local para diagnóstico (padrão: 3000)
 PORT=3000
 ```
 
-Não é necessária nenhuma chave de API externa. O sistema é 100% local.
+> **Como obter a `RENDER_API_KEY`:** acesse o Render Dashboard → **zap-api** →
+> **Environment** → copie o valor de `COLLECTOR_API_KEY`.
+> Se ainda não existe, gere com `openssl rand -hex 32` e salve nos dois lugares.
 
 ---
 
-### 4. Criar o banco de dados
+### 3. Criar o banco de dados local
 
 ```bash
 npm run db:migrate
 ```
 
-Cria `data/db.sqlite` com o schema atual. Idempotente — pode ser rodado novamente sem problemas.
+Cria `data/db.sqlite` com o schema completo. Seguro rodar mais de uma vez.
 
 ---
 
-### 5. Iniciar
+### 4. Iniciar o coletor
 
 ```bash
 npm run dev
 ```
 
-Na primeira execução, um QR code aparece no terminal:
+Na primeira execução um QR code aparece no terminal:
 
 ```
 [index] Banco de dados inicializado
-[api] REST API rodando em http://localhost:3000
+[local-api] Diagnóstico em http://localhost:3000/health
+[local-api] QR scan em http://localhost:3000/qr
 [index] Iniciando conexão WhatsApp…
-Escaneie o QR code para autenticar
+Escaneie o QR code para autenticar (ou acesse http://localhost:3000/qr)
 ```
 
 **Para autenticar:**
 1. Abrir o WhatsApp no celular
 2. Ir em **Configurações → Dispositivos conectados → Conectar dispositivo**
-3. Escanear o QR code
+3. Escanear o QR code no terminal ou em `http://localhost:3000/qr`
 
----
-
-## API REST
-
-Base URL: `http://localhost:3000`
-
-### `GET /conversations/summary`
-
-Triagem paginada de conversas com 10 mensagens de amostra por conversa.
-
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `page` | int | 1 | Página |
-| `limit` | int | 50 | Itens por página (máx 100) |
-| `since` | ISO 8601 | — | Filtrar conversas atualizadas após esta data |
-
-```bash
-curl "http://localhost:3000/conversations/summary?page=1&limit=50"
-curl "http://localhost:3000/conversations/summary?since=2026-04-01T00:00:00Z"
+Após conectar:
+```
+WhatsApp conectado com sucesso
+[pusher] Worker iniciado — ciclo a cada 30s
 ```
 
+Os dados começam a fluir para o Render automaticamente.
+
 ---
 
-### `GET /conversations/updated`
+## Como funciona após conectar
 
-Sync incremental — retorna apenas conversas atualizadas após `since`.
+| Evento Baileys | Ação do coletor |
+|---|---|
+| Nova mensagem | Salva no SQLite + enfileira no `push_queue` |
+| Chat atualizado | Atualiza conversa no SQLite + enfileira |
+| Contato atualizado | Atualiza contato no SQLite + enfileira |
+| A cada 30 segundos | Worker drena a fila e envia lote para a zap-api |
 
-| Parâmetro | Tipo | Obrigatório | Descrição |
-|-----------|------|-------------|-----------|
-| `since` | ISO 8601 | **sim** | Timestamp do último sync |
-| `limit` | int | 50 | Máx 100 |
+O SQLite funciona como **buffer de resiliência**: se a zap-api estiver indisponível, os eventos ficam enfileirados e são reenviados automaticamente com backoff exponencial (até 10 tentativas, de 30s até 30min de intervalo).
 
-Retorna `sync_token` para usar como próximo `since`.
+---
+
+## Diagnóstico local
+
+O coletor expõe apenas três endpoints em `http://localhost:3000`:
 
 ```bash
-curl "http://localhost:3000/conversations/updated?since=2026-04-07T10:00:00Z"
+# Verificar status da conexão WhatsApp
+curl http://localhost:3000/health
+# {"ok":true,"whatsapp":"connected","ts":"2026-04-07T10:00:00.000Z"}
+
+# Estado do QR para automação
+curl http://localhost:3000/auth/qr
+# {"status":"connected","qr":null}
+
+# Página HTML para escanear QR no browser
+open http://localhost:3000/qr
 ```
+
+> Os endpoints de consulta de dados (`/conversations/summary`, `/conversations/updated`,
+> `/conversations/:id/full`) ficam na **zap-api** no Render — não neste coletor.
 
 ---
 
-### `GET /conversations/:id/full`
-
-Histórico completo de uma conversa com paginação por cursor.
-
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `limit` | int | 200 | Máx 500 mensagens |
-| `before` | ISO 8601 | — | Cursor: mensagens anteriores a esta data |
+## Comandos
 
 ```bash
-curl "http://localhost:3000/conversations/5511999998888@s.whatsapp.net/full"
-curl "http://localhost:3000/conversations/5511999998888@s.whatsapp.net/full?before=2026-04-07T12:00:00Z"
-```
-
----
-
-### `GET /auth/qr`
-
-Estado da conexão WhatsApp.
-
-```json
-{ "status": "connected", "qr": null }
-{ "status": "pending",   "qr": "2@abc123..." }
-```
-
----
-
-### `GET /qr`
-
-Página HTML com QR code para autenticação via browser.
-
----
-
-## Comandos disponíveis
-
-```bash
-npm run dev           # inicia o sistema (WhatsApp + API)
-npm run db:migrate    # aplica migrations pendentes
-npm run db:studio     # abre Drizzle Studio para inspecionar o banco
+npm run dev           # inicia coletor (WhatsApp + pusher + diagnóstico)
+npm run db:migrate    # cria/atualiza banco SQLite local
+npm run db:studio     # abre Drizzle Studio para inspecionar o banco no browser
 npm run db:generate   # gera nova migration após alterar src/banco/schema.ts
 npm run typecheck     # verifica erros TypeScript
 npm run lint          # ESLint
@@ -171,52 +157,59 @@ npm run lint          # ESLint
 
 ---
 
-## Estrutura de dados
+## Arquivos gerados localmente
 
 ```
 data/
-├── auth/       # credenciais da sessão WhatsApp (gerado no primeiro login)
-├── db.sqlite   # banco principal
-└── logs/       # sync_runs logs opcionais
+├── auth/       # ⚠️  sessão WhatsApp autenticada — NUNCA commitar, fazer backup
+├── db.sqlite   # banco SQLite (buffer + histórico local)
+└── logs/       # logs opcionais
 ```
 
-> **Nunca commitar `data/auth/`** — contém as credenciais da conta WhatsApp.
+> `data/auth/` já está no `.gitignore`. **Faça backup manual** desta pasta —
+> se for deletada, um novo QR scan será necessário.
 
 ---
 
-## Schema SQLite
+## Schema SQLite (tabelas locais)
 
 | Tabela | Descrição |
-|--------|-----------|
-| `contacts` | Contatos com nome, push_name, is_business, about |
-| `conversations` | Chats (JID completo como PK), com last_message_at e unread_count |
-| `messages` | Mensagens com campos de mídia, from_me, sender_jid, is_forwarded |
+|---|---|
+| `contacts` | Contatos com nome, push_name, is_business, avatar_url, about |
+| `conversations` | Chats (JID completo como PK), last_message_at, unread_count |
+| `messages` | Mensagens com mídia, sender_jid, is_forwarded, quoted_message_id |
 | `sync_runs` | Log de execuções para diagnóstico |
+| `push_queue` | Fila de envio para o Render com status e controle de retry |
 
 ---
 
 ## Re-autenticar
 
-Se o QR code não aparecer ou a conexão falhar com "loggedOut":
+Se a sessão expirar ou aparecer erro "loggedOut":
 
 ```bash
 rm -rf data/auth/
-npm run dev   # novo QR code será gerado
+npm run dev
 ```
 
 ---
 
 ## Solução de problemas
 
-**QR code não aparece**
+**QR code não aparece no terminal**
 ```bash
 rm -rf data/auth/ && npm run dev
 ```
 
-**"Sessão substituída por outro dispositivo"**
-- Encerrar todas as instâncias e reconectar
+**"Sessão substituída por outro dispositivo" (erro 440)**
+O WhatsApp detectou outra instância ativa. Encerrar tudo, aguardar 1 minuto e reconectar.
 
-**Banco desatualizado após atualização**
+**Dados não chegam no Render**
+1. Confirmar que `.env` tem `RENDER_API_URL` e `RENDER_API_KEY` corretos
+2. Confirmar que `COLLECTOR_API_KEY` no Render é igual a `RENDER_API_KEY` no `.env`
+3. Verificar logs — o pusher mostra `✓ N message(s) enviados` ou o erro HTTP específico
+
+**Banco desatualizado após atualizar o projeto**
 ```bash
 npm run db:migrate
 ```
@@ -225,3 +218,13 @@ npm run db:migrate
 ```bash
 PORT=3001 npm run dev
 ```
+
+---
+
+## Branches
+
+| Branch | Descrição |
+|---|---|
+| `main` | Versão atual — coletor com pusher para Render |
+| `zap-collector-local-api` | Versão anterior — coletor com API local completa (sem Render) |
+| `zap-classificator-full` | Versão original — coletor + classificador + dashboard próprio |
