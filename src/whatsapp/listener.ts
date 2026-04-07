@@ -97,13 +97,24 @@ export function registerListeners(sock: WASocket): void {
       if (!id || !remoteJid) continue
       if (remoteJid.endsWith('@g.us')) continue   // ignora grupos
 
+      // Ignora mensagens de sistema (sem conteúdo relevante para o CRM)
+      const msgType = getMessageType(msg.message)
+      const SYSTEM_TYPES = new Set([
+        'protocolMessage',
+        'senderKeyDistributionMessage',
+        'reactionMessage',
+        'pollUpdateMessage',
+        'callLogMesssage',
+        'ephemeralSetting',
+      ])
+      if (SYSTEM_TYPES.has(msgType)) continue
+
       const tsRaw = msg.messageTimestamp
       const tsMs =
         tsRaw == null
           ? Date.now()
           : (typeof tsRaw === 'number' ? tsRaw : Number(tsRaw)) * 1000
 
-      const msgType = getMessageType(msg.message)
       const contextInfo = getContextInfo(msg.message)
 
       // Em grupos, participant é o remetente; em individual, é null quando from_me
