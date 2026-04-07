@@ -304,8 +304,9 @@ export function createApp(): express.Application {
         .all();
 
       const lastItem = rows[rows.length - 1];
+      // +1ms evita que o Manus receba o mesmo item na próxima chamada (gte inclui o limite)
       const syncToken = lastItem?.last_message_at
-        ? new Date(lastItem.last_message_at).toISOString()
+        ? new Date(lastItem.last_message_at + 1).toISOString()
         : null;
 
       const response: IncrementalSyncResponse = {
